@@ -9,7 +9,11 @@ const sandbox = { console, setTimeout, clearTimeout, Date, Math,
 sandbox.window.document = sandbox.document;
 vm.createContext(sandbox); vm.runInContext(script, sandbox);
 const { diasNoMes, diaSemana, mesAnterior, lerFolgas, estadoInicial, gerarEscala,
-        validar, checarFixas, checarDados, distribuirCiclos, pontuarEscala, pisoDiasVazios } = sandbox;
+        validar, checarFixas, checarDados, distribuirCiclos, pontuarEscala, pisoDiasVazios,
+        diagnosticoDomingos } = sandbox;
+// mesmos prazos que gerar() usa
+const LIMITE_TEMPO = vm.runInContext('LIMITE_TEMPO_MS', sandbox);
+const LIMITE_CURTO = vm.runInContext('LIMITE_CURTO_MS', sandbox);
 
 function preparar(lista, y, m, R){
   const N = diasNoMes(y,m);
@@ -32,23 +36,29 @@ function preparar(lista, y, m, R){
 
 function auditar(nome, funcs, offs, N, dw, R){
   const probs = [];
+  const fer = d => !!(R.feriado && R.feriado.has(d));
   funcs.forEach((f,i) => {
     validar(offs[i], N, dw, f.init, f.fixa, R).forEach(e => probs.push(`${f.nome}: ${e}`));
     let sc=f.init.sc, wf=f.init.wf, w0=!!f.init.parcial;
     for(let d=1; d<=N; d++){
-      const isOff = !!offs[i][d];
+      const isOff = !!offs[i][d], h = fer(d);
+      if(h && !isOff) probs.push(`${f.nome}: não está de folga no feriado ${d}`);
       if(dw[d]===0){
-        const alvo = sc >= R.maxDom ? 3 : 2, tot = wf + (isOff?1:0);
+        const base = sc >= R.maxDom ? 3 : 2;
+        const alvo = (h && sc >= R.maxDom && !R.ferConta) ? base-1 : base;
+        const tot = wf + (isOff && !(h && !R.ferConta) ? 1 : 0);
         if(w0 ? tot > alvo : tot !== alvo) probs.push(`${f.nome}: semana do dom ${d} com ${tot} folgas (esperado ${w0?'<=':'='} ${alvo})`);
-        if(!f.fixa.has(d)){
+        if(!f.fixa.has(d) && !h){
           if(sc >= R.maxDom && !isOff) probs.push(`${f.nome}: deveria folgar o domingo ${d}`);
           if(sc < R.maxDom && isOff) probs.push(`${f.nome}: folgou o domingo ${d} cedo demais`);
-          sc = isOff ? 0 : sc+1;
         }
+        sc = h ? (sc >= R.maxDom ? 0 : sc) : (isOff ? (f.fixa.has(d) ? sc : 0) : sc+1);
         wf = 0; w0 = false;
-      } else wf += isOff?1:0;
+      } else wf += (isOff && !(h && !R.ferConta)) ? 1 : 0;
     }
-    for(let d=1; d<N; d++) if(offs[i][d] && offs[i][d+1]) probs.push(`${f.nome}: folgas casadas ${d}/${d+1}`);
+    for(let d=1; d<N; d++){
+      if(offs[i][d] && offs[i][d+1] && !fer(d) && !fer(d+1)) probs.push(`${f.nome}: folgas casadas ${d}/${d+1}`);
+    }
     let seq=0;
     for(let d=1; d<=N; d++){
       if(offs[i][d] && !f.fixa.has(d)) seq=0;
@@ -56,6 +66,7 @@ function auditar(nome, funcs, offs, N, dw, R){
     }
   });
   for(let d=1; d<=N; d++){
+    if(fer(d)) continue;   // feriado: todo mundo folga, o limite não se aplica
     const c = offs.filter(o=>o[d]).length;
     if(c > R.maxFolga) probs.push(`dia ${d}: ${c} folgas > ${R.maxFolga}`);
     for(const g of ['fech','inter']){
@@ -92,14 +103,22 @@ for(const R of [{maxFolga:2,maxSeq:5,maxDom:3,maxTurno:1},{maxFolga:3,maxSeq:5,m
             if(modo==='fixas' && i===0) o.fixas = '10, 22';
             lista.push(o);
           }
-          const {funcs, N, dw} = preparar(lista, y, m, R);
-          const rotulo = `${m}/${y} n=${n} cap=${R.maxFolga} maxDom=${R.maxDom} ${modo}`;
-          const errs = checarDados(funcs, N, R);
-          funcs.forEach(f => checarFixas(f.fixa, f.init, dw, N, R).forEach(e => errs.push(`${f.nome}: ${e}`)));
+          // feriados: um terço sem, um terço com um, um terço com dois (metade contando como folga)
+          const modoFer = (m + n) % 3;
+          const R2 = Object.assign({}, R);
+          R2.feriado = new Set(modoFer===0 ? [] : modoFer===1 ? [25] : [8,25]);
+          R2.feriadoNome = new Map([[25,'Natal']]);
+          R2.ferConta = ((m + n) % 2 === 0);
+          const {funcs, N, dw} = preparar(lista, y, m, R2);
+          const rotulo = `${m}/${y} n=${n} cap=${R2.maxFolga} maxDom=${R2.maxDom} ${modo} fer=${modoFer} conta=${R2.ferConta?1:0}`;
+          const errs = checarDados(funcs, N, R2);
+          funcs.forEach(f => checarFixas(f.fixa, f.init, dw, N, R2).forEach(e => errs.push(`${f.nome}: ${e}`)));
           if(errs.length) continue;  // dados de teste inviáveis de propósito
           total++;
           const t0 = Date.now();
-          const offs = gerarEscala(funcs, N, dw, R);
+          // igual a gerar(): se o diagnóstico já prova que não há solução, busca curta
+          const previo = diagnosticoDomingos(funcs, N, dw, R2);
+          const offs = gerarEscala(funcs, N, dw, R2, previo.length ? LIMITE_CURTO : LIMITE_TEMPO);
           const ms = Date.now()-t0;
           if(ms > 1200){ lento++; console.log(`  lento: ${rotulo} (${ms}ms)`); }
           if(!offs){
@@ -109,10 +128,10 @@ for(const R of [{maxFolga:2,maxSeq:5,maxDom:3,maxTurno:1},{maxFolga:3,maxSeq:5,m
             continue;
           }
           gerou++;
-          ruim += auditar(rotulo, funcs, offs, N, dw, R);
+          ruim += auditar(rotulo, funcs, offs, N, dw, R2);
           // equilíbrio
-          const s = pontuarEscala(offs, N);
-          const piso = pisoDiasVazios(funcs, offs, N, dw, R).piso;
+          const s = pontuarEscala(offs, N, R2);
+          const piso = pisoDiasVazios(funcs, offs, N, dw, R2).piso;
           somaVazios += s.vazios; somaPiso += piso;
           if(s.vazios > piso){
             acimaPiso++;
