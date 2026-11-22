@@ -48,8 +48,6 @@ table.eq th{text-align:left;font-size:12px;font-weight:600;color:var(--sub);padd
 table.eq td{padding:6px 8px;border-bottom:1px solid #eceef1;vertical-align:middle}
 table.eq td.acao{width:90px;text-align:right}
 table.eq input[type=text]{height:32px}
-.fechchk{display:flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap}
-.fechchk input{width:16px;height:16px;accent-color:var(--pri)}
 .vazio{padding:16px;text-align:center;color:var(--sub);border:1px dashed #c9cdd2;border-radius:4px;display:none;margin-top:8px}
 .rodape-eq{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-top:12px}
 .contador{font-size:12px;color:var(--sub)}
@@ -80,6 +78,9 @@ table.escala tr.res td{font-size:11px;font-weight:600;height:26px;color:var(--su
 table.escala tr.res td.nome{color:var(--txt)}
 table.escala tr.res td.estour{background:var(--erro-bg);color:var(--erro);font-weight:700}
 .fech{font-size:10px;font-weight:700;color:var(--sub);margin-left:6px;border:1px solid #c9cdd2;border-radius:3px;padding:0 3px;vertical-align:middle}
+.fech.int{color:#6b5310;border-color:#dcc47c;background:#fdf8e6}
+table.eq select{height:32px;padding:0 6px}
+table.escala tr.res td.vazioDia{background:#fdecec;color:var(--erro);font-weight:700}
 
 /* verificação e avisos */
 .vl{padding:8px 0;border-bottom:1px solid #eceef1;font-size:13px}
@@ -133,7 +134,7 @@ body.modo-escala table.escala .nome{min-width:clamp(120px,13vw,220px)}
 
 <header>
   <h1>Simulador de escala 5x2</h1>
-  <p>Gera a escala do mês respeitando folgas, compensações e regras do fechamento.</p>
+  <p>Gera a escala do mês respeitando folgas, compensações, turnos e as regras do fechamento e do intermediário.</p>
 </header>
 
 <button id="sairFixo" class="btn sec" data-acao="sair">Sair da tela cheia</button>
@@ -148,6 +149,9 @@ body.modo-escala table.escala .nome{min-width:clamp(120px,13vw,220px)}
       <b>Máx. dias seguidos:</b> quantos dias podem ser trabalhados antes de uma folga regular (a compensação não zera).
       <b>Domingos antes da folga:</b> quantos domingos seguidos são trabalhados antes da folga de domingo.
       <b>Semana da folga de domingo:</b> a pessoa tem 3 folgas na semana (o domingo + 2); nas demais semanas, 2 folgas.
+      <b>Máx. do mesmo turno de folga por dia:</b> quantas pessoas do fechamento (ou do intermediário) podem folgar
+      no mesmo dia, para o turno não ficar descoberto.
+      <b>Equilíbrio:</b> entre as escalas válidas o simulador prefere a que deixa menos dias sem ninguém de folga.
     </p>
     <div class="campos">
       <div class="campo">
@@ -178,6 +182,10 @@ body.modo-escala table.escala .nome{min-width:clamp(120px,13vw,220px)}
         <input type="number" id="r-dom" value="3" min="1" max="10">
       </div>
       <div class="campo curto">
+        <label for="r-turno">Máx. do mesmo turno de folga por dia</label>
+        <input type="number" id="r-turno" value="1" min="1" max="50">
+      </div>
+      <div class="campo curto">
         <button type="button" class="btn" data-acao="gerar">Gerar escala</button>
       </div>
     </div>
@@ -191,13 +199,16 @@ body.modo-escala table.escala .nome{min-width:clamp(120px,13vw,220px)}
       <b>Compensações do mês gerado:</b> dias já marcados (ex.: 10, 25).
       Se uma pessoa não tiver dados do mês anterior, o simulador distribui automaticamente
       a contagem de domingos dela para não coincidir com as demais pessoas.
+      <b>Turno:</b> Manhã, Intermediário (entra às 10h e sai às 20h) ou Fechamento.
+      Fechamento e Intermediário são turnos de cobertura: por padrão só uma pessoa de cada um
+      deles pode folgar no mesmo dia (ajuste em "Máx. do mesmo turno de folga por dia").
     </p>
     <div class="tab-eq">
       <table class="eq">
         <thead>
           <tr>
             <th>Nome</th>
-            <th>Fechamento</th>
+            <th>Turno</th>
             <th>Folgas do mês anterior</th>
             <th>Compensações do mês gerado</th>
             <th></th>
@@ -222,6 +233,9 @@ body.modo-escala table.escala .nome{min-width:clamp(120px,13vw,220px)}
 
 <script>
 const DIAS = ['D','S','T','Q','Q','S','S'];
+const TURNOS = { manha:'Manhã', inter:'Intermediário (10h–20h)', fech:'Fechamento' };
+// turnos de cobertura: têm limite próprio de folgas por dia
+const gruposDe = f => (f.turno === 'fech' || f.turno === 'inter') ? f.turno : '';
 const MESES = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
 const $ = id => document.getElementById(id);
 let ultimo = null;
@@ -254,8 +268,12 @@ function toast(msg, ms=3500){
 }
 
 /* ---------- busca ---------- */
-const LIMITE_NOS = 30000;      // nós por pessoa em cada tentativa
-const LIMITE_TEMPO_MS = 2500;  // tempo total da busca antes de desistir
+const LIMITE_NOS = 30000;        // nós por pessoa em cada tentativa
+const LIMITE_TEMPO_MS = 2500;    // tempo para achar uma escala válida
+const LIMITE_MELHORA_MS = 350;   // tempo extra procurando uma mais equilibrada
+const LIMITE_EXTRAS = 400;       // quantas opções a mais testar depois da primeira válida
+const LIMITE_SEM_MELHORA = 150;  // para de insistir quando nada melhora
+const zeros = N => new Array(N+1).fill(0);
 
 /* ---------- utilidades ---------- */
 function escapar(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -277,7 +295,7 @@ function lerFolgas(str, max){
 }
 function lerRegras(){
   const v = (id, def) => { const n = parseInt($(id).value,10); return (isNaN(n) || n<1) ? def : n; };
-  return { maxFolga: v('r-cap',2), maxSeq: v('r-seq',5), maxDom: v('r-dom',3) };
+  return { maxFolga: v('r-cap',2), maxSeq: v('r-seq',5), maxDom: v('r-dom',3), maxTurno: v('r-turno',1) };
 }
 // folgas exigidas numa semana: 3 na semana da folga de domingo (sc >= maxDom), 2 nas demais
 function alvoSemana(sc, R){ return sc >= R.maxDom ? 3 : 2; }
@@ -323,7 +341,7 @@ function distribuirCiclos(funcs, N, dw, R){
 
   // pessoas cuja fase vamos escolher (as demais já vêm do mês anterior)
   const pend = funcs.filter(f => f.semPrev);
-  pend.sort((a,b) => (b.fech?1:0) - (a.fech?1:0)); // fechamento primeiro
+  pend.sort((a,b) => (gruposDe(b)?1:0) - (gruposDe(a)?1:0)); // turnos de cobertura primeiro
   const perfis = new Map();  // pessoa -> [perfil por fase]
   pend.forEach(f => {
     const lista = [];
@@ -336,19 +354,21 @@ function distribuirCiclos(funcs, N, dw, R){
 
   function custo(scList){
     const alvos = semanas.map(() => 0);
-    const dom = new Array(N+1).fill(0), fdom = new Array(N+1).fill(0);
+    const dom = new Array(N+1).fill(0);
+    const gdom = { fech: zeros(N), inter: zeros(N) };
     let coladas = 0;
     // compensações marcadas em domingo já ocupam vaga nesse dia
     funcs.forEach(f => f.fixa.forEach(d => {
-      if(dw[d]===0){ dom[d]++; if(f.fech) fdom[d]++; }
+      if(dw[d]===0){ dom[d]++; const g0 = gruposDe(f); if(g0) gdom[g0][d]++; }
     }));
     const somar = (f, p) => {
       for(let w=0; w<p.alvos.length; w++){
         if(w===0 && f.init.parcial) continue;  // 1ª semana parcial: só o teto vale
         alvos[w] += p.alvos[w];
       }
+      const g = gruposDe(f);
       p.doms.forEach(d => {
-        dom[d]++; if(f.fech) fdom[d]++;
+        dom[d]++; if(g) gdom[g][d]++;
         // folga de domingo colada numa compensação marcada = folgas casadas
         if(f.fixa.has(d-1) || f.fixa.has(d+1)) coladas++;
       });
@@ -371,7 +391,9 @@ function distribuirCiclos(funcs, N, dw, R){
     for(let d=1; d<=N; d++){
       if(dw[d]!==0) continue;
       if(dom[d] > R.maxFolga) c += (dom[d]-R.maxFolga)*10000;  // dia estourado
-      if(fdom[d] > 1)         c += (fdom[d]-1)*10000;          // 2 do fechamento
+      for(const g in gdom){                                    // turno de cobertura descoberto
+        if(gdom[g][d] > R.maxTurno) c += (gdom[g][d]-R.maxTurno)*10000;
+      }
       c += dom[d]*dom[d];                                      // equilibra os domingos
     }
     return c + coladas*100000;
@@ -422,12 +444,13 @@ function distribuirCiclos(funcs, N, dw, R){
 }
 
 /* ---------- lista de pessoas ---------- */
-function addEmp(nome='', fech=false, prev='', fixas=''){
+function addEmp(nome='', turno='manha', prev='', fixas=''){
   const tr = document.createElement('tr');
   tr.className = 'eq-row';
+  const opt = (v, rotulo) => `<option value="${v}"${turno===v ? ' selected' : ''}>${rotulo}</option>`;
   tr.innerHTML = `
     <td><input type="text" class="e-nome" placeholder="Nome" value="${escapar(nome)}"></td>
-    <td><label class="fechchk"><input type="checkbox" class="e-fech" ${fech?'checked':''}> Sim</label></td>
+    <td><select class="e-turno">${opt('manha','Manhã')}${opt('inter','Intermediário (10h–20h)')}${opt('fech','Fechamento')}</select></td>
     <td><input type="text" class="e-prev" placeholder="ex.: 4, 11c, 18" value="${escapar(prev)}"></td>
     <td><input type="text" class="e-fix" placeholder="ex.: 10, 25" value="${escapar(fixas)}"></td>
     <td class="acao"><button type="button" class="btn txt peq" title="Remover" data-acao="remover">Remover</button></td>`;
@@ -442,12 +465,12 @@ function atualizaContador(){
 function limpar(){ $('lista').innerHTML = ''; atualizaContador(); toast('Lista limpa.'); }
 function exemplo(){
   $('lista').innerHTML = '';
-  addEmp('Ana', true, '4, 6, 8, 11, 13, 18, 20, 22c, 25, 27, 29', '');
-  addEmp('Bruno', false, '', '');
-  addEmp('Carla', true, '3, 5, 10, 12, 17, 19, 22, 24, 26', '');
-  addEmp('Diego', false, '', '');
-  addEmp('Eduarda', false, '', '');
-  addEmp('Fábio', false, '', '');
+  addEmp('Ana', 'fech', '4, 6, 8, 11, 13, 18, 20, 22c, 25, 27, 29', '');
+  addEmp('Bruno', 'manha', '', '');
+  addEmp('Carla', 'fech', '3, 5, 10, 12, 17, 19, 22, 24, 26', '');
+  addEmp('Diego', 'inter', '', '');
+  addEmp('Eduarda', 'inter', '', '');
+  addEmp('Fábio', 'manha', '', '');
 }
 
 /* ---------- estado inicial vindo do mês anterior ---------- */
@@ -504,14 +527,28 @@ function checarFixas(fixa, init, dw, N, R){
   return erros;
 }
 
+/* ---------- checagem dos dados da equipe (compensações marcadas) ---------- */
+function checarDados(funcs, N, R){
+  const erros = [];
+  for(let d=1; d<=N; d++){
+    const c = funcs.filter(f => f.fixa.has(d)).length;
+    if(c > R.maxFolga) erros.push(`dia ${d}: ${c} compensações marcadas (limite de ${R.maxFolga} por dia)`);
+    for(const g of ['fech','inter']){
+      const cg = funcs.filter(f => f.turno === g && f.fixa.has(d)).length;
+      if(cg > R.maxTurno) erros.push(`dia ${d}: ${cg} pessoas do turno ${TURNOS[g].toLowerCase()} com compensação no mesmo dia (limite de ${R.maxTurno} por dia)`);
+    }
+  }
+  return erros;
+}
+
 /* ---------- montagem da escala de uma pessoa (busca com retrocesso) ---------- */
-function montar(N, dw, init, fixa, R, cont, fechCnt, fech){
+function montar(N, dw, init, fixa, R, cont, grupoCnt, limGrupo){
   const off = new Array(N+1).fill(false);
   // domingo que fecha a semana de cada dia (ou o fim do mês, se não houver)
   const fimSem = new Array(N+2).fill(N);
   let prox = N;
   for(let d=N; d>=1; d--){ if(dw[d]===0) prox = d; fimSem[d] = prox; }
-  const podeDia = d => fixa.has(d) || (cont[d] < R.maxFolga && !(fech && fechCnt[d] > 0));
+  const podeDia = d => fixa.has(d) || (cont[d] < R.maxFolga && grupoCnt[d] < limGrupo);
 
   // teto de folgas que ainda dá para encaixar de d até o fim da semana,
   // sem casar folgas e respeitando o limite do dia e a regra do domingo
@@ -536,7 +573,8 @@ function montar(N, dw, init, fixa, R, cont, fechCnt, fech){
     if(comp) ops = [true];
     else if(w===0) ops = sc >= R.maxDom ? [true] : [false];
     else {
-      ops = Math.random() < 2/7 ? [true,false] : [false,true];
+      // prefere folgar nos dias em que ninguém folga ainda: evita dia descoberto
+      ops = (cont[d] === 0 || Math.random() < 2/7) ? [true,false] : [false,true];
       // se o que falta na semana só cabe nos dias que restam, não dá para adiar
       const fim = fimSem[d];
       if(!w0 && dw[fim]===0){
@@ -552,7 +590,7 @@ function montar(N, dw, init, fixa, R, cont, fechCnt, fech){
     for(const isOff of ops){
       if(isOff){
         if(po || wf>=alvo) continue;
-        if(!comp && (cont[d] >= R.maxFolga || (fech && fechCnt[d] > 0))) continue;
+        if(!comp && (cont[d] >= R.maxFolga || grupoCnt[d] >= limGrupo)) continue;
       } else if(sr >= R.maxSeq) continue;
 
       const nwf = wf + (isOff?1:0);
@@ -572,27 +610,152 @@ function montar(N, dw, init, fixa, R, cont, fechCnt, fech){
   return dfs(1, init.sc, init.wf, init.last, init.sr, !!init.parcial) ? off : null;
 }
 
-/* ---------- escala da equipe toda, com reinícios aleatórios ---------- */
+/* ---------- qualidade: dias sem ninguém de folga e equilíbrio entre os dias ---------- */
+function pontuarEscala(res, N){
+  const cont = zeros(N);
+  res.forEach(o => { for(let d=1; d<=N; d++) if(o[d]) cont[d]++; });
+  let vazios = 0, min = Infinity, max = -Infinity, soma = 0, total = 0;
+  for(let d=1; d<=N; d++){
+    const c = cont[d];
+    total += c;
+    if(c === 0) vazios++;
+    if(c < min) min = c;
+    if(c > max) max = c;
+    soma += c*c;
+  }
+  return {
+    vazios, spread: max-min, soma, total,
+    // com T folgas em N dias, pelo menos N-T dias ficam sem ninguém de folga
+    pisoVazios: Math.max(0, N-total)
+  };
+}
+function melhorPontuacao(a, b){
+  if(a.vazios !== b.vazios) return a.vazios < b.vazios;
+  if(a.spread !== b.spread) return a.spread < b.spread;
+  return a.soma < b.soma;
+}
+/* ---------- dias em que ninguém pode folgar (domingo fora do ciclo de todos) ---------- */
+function diasSemOpcao(funcs, N, dw, R){
+  const sem = [];
+  for(let dom=1; dom<=N; dom++){
+    if(dw[dom]!==0) continue;
+    const alguem = funcs.some(f => {
+      if(f.fixa.has(dom)) return true;
+      let sc = f.init.sc;
+      for(let d=1; d<dom; d++){
+        if(dw[d]!==0 || f.fixa.has(d)) continue;
+        sc = sc >= R.maxDom ? 0 : sc+1;
+      }
+      return sc >= R.maxDom;
+    });
+    if(!alguem) sem.push(dom);
+  }
+  return sem;
+}
+
+/* ---------- mínimo de dias sem ninguém de folga ----------
+   Três limites que nenhuma escala consegue passar:
+   - faltarem folgas para o mês inteiro (N dias, T folgas -> N-T dias vazios);
+   - cada semana só poder ter folgas nos dias que tem (folgas da semana < dias da semana);
+   - domingos fora do ciclo de folga de todo mundo. */
+function pisoDiasVazios(funcs, offs, N, dw, R){
+  const total = offs.reduce((a,o) => a + o.slice(1).filter(Boolean).length, 0);
+  let semanal = 0, dias = 0, q = 0;
+  for(let d=1; d<=N; d++){
+    dias++;
+    q += offs.filter(o => o[d]).length;
+    if(dw[d]===0 || d===N){ semanal += Math.max(0, dias-q); dias = 0; q = 0; }
+  }
+  return {
+    piso: Math.max(0, N-total, semanal, diasSemOpcao(funcs, N, dw, R).length),
+    total, semanal
+  };
+}
+
+/* ---------- reequilíbrio: desloca folgas dos dias cheios para os dias vazios ----------
+   Só move dentro da mesma semana (assim a quantidade de folgas da semana não muda)
+   e só aceita a troca se a pessoa continuar válida em todas as regras. */
+function equilibrar(res, funcs, N, dw, R){
+  const out = res.map(o => o.slice());
+  const cont = zeros(N);
+  const gCnt = { fech: zeros(N), inter: zeros(N) };
+  out.forEach((o,i) => {
+    const g = gruposDe(funcs[i]);
+    for(let d=1; d<=N; d++) if(o[d]){ cont[d]++; if(g) gCnt[g][d]++; }
+  });
+  // início e fim da semana seg-dom de cada dia
+  const ini = new Array(N+2), fim = new Array(N+2);
+  let a = 1;
+  for(let d=1; d<=N; d++){
+    ini[d] = a;
+    if(dw[d]===0 || d===N){ for(let x=a; x<=d; x++) fim[x] = d; a = d+1; }
+  }
+  for(let passe=0; passe<80; passe++){
+    let mudou = false;
+    for(let i=0; i<out.length && !mudou; i++){
+      const f = funcs[i], g = gruposDe(f);
+      for(let d=1; d<=N && !mudou; d++){
+        if(!out[i][d] || f.fixa.has(d)) continue;
+        for(let d2=ini[d]; d2<=fim[d]; d2++){
+          if(d2===d || out[i][d2] || f.fixa.has(d2)) continue;
+          if(cont[d] - cont[d2] < 2) continue;             // a troca não equilibra
+          if(g && gCnt[g][d2] >= R.maxTurno) continue;     // deixaria o turno descoberto
+          const tenta = out[i].slice();
+          tenta[d] = false; tenta[d2] = true;
+          if(validar(tenta, N, dw, f.init, f.fixa, R).length) continue;
+          out[i] = tenta;
+          cont[d]--; cont[d2]++;
+          if(g){ gCnt[g][d]--; gCnt[g][d2]++; }
+          mudou = true;
+          break;
+        }
+      }
+    }
+    if(!mudou) break;
+  }
+  return out;
+}
+
+/* ---------- escala da equipe: gera várias opções e fica com a mais equilibrada ---------- */
 function gerarEscala(funcs, N, dw, R){
-  const ate = Date.now() + LIMITE_TEMPO_MS;
-  for(let t=0; t<5000 && Date.now() < ate; t++){
-    const cont = new Array(N+1).fill(0), fechCnt = new Array(N+1).fill(0);
-    funcs.forEach(f => f.fixa.forEach(d => { cont[d]++; if(f.fech) fechCnt[d]++; }));
+  const inicio = Date.now();
+  // domingos em que ninguém pode folgar: esses dias ficam vazios de qualquer jeito
+  const pisoDias = diasSemOpcao(funcs, N, dw, R).length;
+  let melhor = null, melhorS = null, extras = 0, semMelhora = 0;
+  for(let t=0; t<20000; t++){
+    const gasto = Date.now() - inicio;
+    // sem nenhuma escala ainda usa o tempo todo; depois, só um tempo extra de equilíbrio
+    if(!melhor){
+      if(gasto > LIMITE_TEMPO_MS) break;
+    } else if(gasto > LIMITE_TEMPO_MS + LIMITE_MELHORA_MS || extras >= LIMITE_EXTRAS || semMelhora >= LIMITE_SEM_MELHORA){
+      break;
+    }
+    const cont = zeros(N);
+    const gCnt = { fech: zeros(N), inter: zeros(N) };
+    funcs.forEach(f => f.fixa.forEach(d => { cont[d]++; const g = gruposDe(f); if(g) gCnt[g][d]++; }));
     const ordem = shuffle(funcs.map((_,i)=>i));
     const res = new Array(funcs.length);
     let ok = true;
     for(const i of ordem){
       const f = funcs[i];
-      const o = montar(N, dw, f.init, f.fixa, R, cont, fechCnt, f.fech);
+      const g = gruposDe(f);
+      const o = montar(N, dw, f.init, f.fixa, R, cont, g ? gCnt[g] : zeros(N), g ? R.maxTurno : Infinity);
       if(!o){ ok = false; break; }
       res[i] = o;
       for(let d=1; d<=N; d++){
-        if(o[d] && !f.fixa.has(d)){ cont[d]++; if(f.fech) fechCnt[d]++; }
+        if(o[d] && !f.fixa.has(d)){ cont[d]++; if(g) gCnt[g][d]++; }
       }
     }
-    if(ok) return res;
+    if(!ok) continue;
+    if(melhor) extras++;
+    const eq = equilibrar(res, funcs, N, dw, R);
+    const s = pontuarEscala(eq, N);
+    if(!melhorS || melhorPontuacao(s, melhorS)){ melhor = eq; melhorS = s; semMelhora = 0; }
+    else semMelhora++;
+    // todos os dias que dá para cobrir estão cobertos e bem distribuídos
+    if(melhorS.vazios <= Math.max(melhorS.pisoVazios, pisoDias) && melhorS.spread <= 1) break;
   }
-  return null;
+  return melhor;
 }
 
 /* ---------- validação independente ---------- */
@@ -679,9 +842,11 @@ function diagnosticoDomingos(funcs, N, dw, R){
     if(quem.length > R.maxFolga){
       msgs.push(`domingo ${dom}: ${quem.length} pessoas precisariam folgar (${quem.map(f=>f.nome).join(', ')}), mas o limite é ${R.maxFolga} por dia`);
     }
-    const fech = quem.filter(f=>f.fech);
-    if(fech.length > 1){
-      msgs.push(`domingo ${dom}: mais de uma pessoa do fechamento precisaria folgar (${fech.map(f=>f.nome).join(', ')})`);
+    for(const g of ['fech','inter']){
+      const doGrupo = quem.filter(f => f.turno === g);
+      if(doGrupo.length > R.maxTurno){
+        msgs.push(`domingo ${dom}: ${doGrupo.length} pessoas do turno ${TURNOS[g].toLowerCase()} precisariam folgar (${doGrupo.map(f=>f.nome).join(', ')}), mas o limite do turno é ${R.maxTurno} por dia`);
+      }
     }
   }
   return msgs;
@@ -702,12 +867,17 @@ function gerar(){
   const dw = [null];
   for(let d=1; d<=N; d++) dw[d] = diaSemana(y,m,d);
 
-  const funcs = [...document.querySelectorAll('.eq-row')].map(r => ({
-    nome: r.querySelector('.e-nome').value.trim(),
-    fech: r.querySelector('.e-fech').checked,
-    prev: r.querySelector('.e-prev').value,
-    fixas: r.querySelector('.e-fix').value
-  })).filter(f => f.nome);
+  const funcs = [...document.querySelectorAll('.eq-row')].map(r => {
+    const turno = r.querySelector('.e-turno').value || 'manha';
+    return {
+      nome: r.querySelector('.e-nome').value.trim(),
+      turno,
+      fech: turno === 'fech',
+      inter: turno === 'inter',
+      prev: r.querySelector('.e-prev').value,
+      fixas: r.querySelector('.e-fix').value
+    };
+  }).filter(f => f.nome);
   if(!funcs.length){ toast('Adicione pelo menos uma pessoa.'); return; }
 
   const avisos = [], erros = [];
@@ -752,12 +922,7 @@ function gerar(){
     checarFixas(f.fixa, f.init, dw, N, R).forEach(e => erros.push(`${f.nome}: ${e}`));
   });
 
-  for(let d=1; d<=N; d++){
-    const c = funcs.filter(f => f.fixa.has(d)).length;
-    if(c > R.maxFolga) erros.push(`dia ${d}: ${c} compensações marcadas (limite de ${R.maxFolga} por dia)`);
-    const cf = funcs.filter(f => f.fech && f.fixa.has(d)).length;
-    if(cf > 1) erros.push(`dia ${d}: mais de uma pessoa do fechamento com compensação no mesmo dia`);
-  }
+  checarDados(funcs, N, R).forEach(e => erros.push(e));
   if(erros.length){ mostrarErro('Não é possível gerar com estes dados:', erros); return; }
 
   // a busca pode levar alguns segundos em equipes grandes: mostra aviso antes
@@ -769,7 +934,7 @@ function gerar(){
       if(!lista.length){
         lista.push(`Tente aumentar o limite de pessoas de folga por dia (atual: ${R.maxFolga}).`);
         lista.push('Revise as folgas do mês anterior e as compensações marcadas.');
-        lista.push('Se houver duas pessoas no fechamento, confira se os ciclos de domingo não coincidem.');
+        lista.push('Se houver duas pessoas no mesmo turno de cobertura (fechamento ou intermediário), confira se os ciclos de domingo não coincidem.');
       }
       mostrarErro('Não encontrei uma escala que respeite todas as regras.', lista);
       return;
@@ -802,6 +967,8 @@ function render(){
           <span class="lg sep-leg">início da semana</span>
           <span class="lg">Limite: ${R.maxFolga} folga(s) por dia</span>
           <span class="lg">Semana da folga de domingo: 3 folgas</span>
+          <span class="lg"><b>F</b> fechamento · <b>I</b> intermediário (10h–20h)</span>
+          <span class="lg"><span class="amostra" style="background:#fdecec"></span> dia sem ninguém de folga</span>
         </div>
       </div>
       <div class="acoes">
@@ -834,15 +1001,17 @@ function render(){
         cells += `<td class="${[...base, zb].filter(Boolean).join(' ')}"></td>`;
       }
     }
-    const marca = f.fech ? '<span class="fech" title="Fechamento">F</span>' : '';
+    const marca = f.turno === 'fech'  ? '<span class="fech" title="Fechamento">F</span>'
+                : f.turno === 'inter' ? '<span class="fech int" title="Intermediário: entra às 10h e sai às 20h">I</span>'
+                : '';
     h += `<tr><td class="nome">${escapar(f.nome)}${marca}</td>${cells}<td class="tot">${tot}</td></tr>`;
   });
 
   h += `<tr class="res"><td class="nome">Folgas no dia</td>`;
   for(let d=1; d<=N; d++){
     const c = cont[d];
-    const cls = [tipo(d), sep(d), c > R.maxFolga ? 'estour' : ''].filter(Boolean).join(' ');
-    h += `<td class="${cls}">${c}</td>`;
+    const cls = [tipo(d), sep(d), c > R.maxFolga ? 'estour' : '', c === 0 ? 'vazioDia' : ''].filter(Boolean).join(' ');
+    h += `<td class="${cls}"${c === 0 ? ' title="Ninguém de folga neste dia"' : ''}>${c}</td>`;
   }
   h += `<td class="tot"></td></tr>`;
 
@@ -872,14 +1041,37 @@ function render(){
     ? `<div class="vl"><span class="nok">Dias acima do limite de ${R.maxFolga}: ${estour.join(', ')}</span></div>`
     : `<div class="vl"><span class="ok">Nenhum dia acima do limite de ${R.maxFolga} folga(s)</span></div>`;
 
-  const diasFech = [];
-  for(let d=1; d<=N; d++){
-    const c = funcs.filter((f,i) => f.fech && offs[i][d]).length;
-    if(c > 1) diasFech.push(d);
+  for(const g of ['fech','inter']){
+    const doGrupo = funcs.filter(f => f.turno === g);
+    if(!doGrupo.length) continue;
+    const dias = [];
+    for(let d=1; d<=N; d++){
+      const c = funcs.filter((f,i) => f.turno === g && offs[i][d]).length;
+      if(c > R.maxTurno) dias.push(d);
+    }
+    v += dias.length
+      ? `<div class="vl"><span class="nok">${TURNOS[g]}: mais de ${R.maxTurno} pessoa de folga no mesmo dia (${dias.join(', ')})</span></div>`
+      : `<div class="vl"><span class="ok">${TURNOS[g]}: no máximo ${R.maxTurno} de folga por dia</span></div>`;
   }
-  v += diasFech.length
-    ? `<div class="vl"><span class="nok">Fechamento com folga simultânea nos dias: ${diasFech.join(', ')}</span></div>`
-    : `<div class="vl"><span class="ok">Fechamento: ninguém folga junto com outra pessoa do fechamento</span></div>`;
+
+  // dias em que ninguém folga: o objetivo é não deixar nenhum, quando dá
+  const diasVazios = [];
+  for(let d=1; d<=N; d++) if(cont[d] === 0) diasVazios.push(d);
+  const lim = pisoDiasVazios(funcs, offs, N, dw, R);
+  const piso = lim.piso, totalFolgas = lim.total;
+  const semOpcao = diasSemOpcao(funcs, N, dw, R);
+  const motivo = [];
+  if(N - totalFolgas > 0) motivo.push(`são ${totalFolgas} folgas para ${N} dias`);
+  if(semOpcao.length) motivo.push(`${semOpcao.length === 1 ? 'o domingo ' + semOpcao[0] + ' está' : 'os domingos ' + semOpcao.join(', ') + ' estão'} fora do ciclo de folga de todos`);
+  if(lim.semanal > Math.max(0, N-totalFolgas) && lim.semanal > semOpcao.length) motivo.push('cada semana tem menos folgas do que dias');
+  if(!diasVazios.length){
+    v += `<div class="vl"><span class="ok">Todos os dias do mês têm pelo menos uma pessoa de folga</span></div>`;
+  } else {
+    // o gerador já desloca folgas dos dias cheios para os vazios; o que sobra
+    // normalmente é consequência das outras regras (domingo, dias seguidos, limite do dia)
+    const extra = motivo.length ? ` Pelo menos ${piso} não têm como ser evitados: ${motivo.join('; ')}.` : '';
+    v += `<div class="vl">${diasVazios.length} dia(s) sem ninguém de folga: ${diasVazios.join(', ')}. O simulador redistribui as folgas para reduzir esses dias.${extra}</div>`;
+  }
   v += `</section>`;
 
   $('resultado').innerHTML = h + v;
@@ -925,7 +1117,7 @@ function exportarCSV(){
   if(!ultimo){ toast('Gere a escala primeiro.'); return; }
   const {y,m,N,dw,funcs,offs} = ultimo;
   const linhas = [];
-  linhas.push(['Funcionário', ...Array.from({length:N}, (_,i) => `${i+1} ${DIAS[dw[i+1]]}`), 'Folgas'].join(';'));
+  linhas.push(['Funcionário', 'Turno', ...Array.from({length:N}, (_,i) => `${i+1} ${DIAS[dw[i+1]]}`), 'Folgas'].join(';'));
   funcs.forEach((f,i) => {
     let tot = 0;
     const cells = Array.from({length:N}, (_,j) => {
@@ -933,8 +1125,9 @@ function exportarCSV(){
       tot++;
       return f.fixa.has(j+1) ? 'C' : 'X';
     });
-    linhas.push([f.nome, ...cells, tot].join(';'));
+    linhas.push([f.nome, TURNOS[f.turno] || TURNOS.manha, ...cells, tot].join(';'));
   });
+  linhas.push(['Folgas no dia', '', ...Array.from({length:N}, (_,j) => offs.filter(o => o[j+1]).length), ''].join(';'));
   const conteudo = '\uFEFF' + linhas.join('\r\n');
   const nomeArq = `escala_${y}_${String(m).padStart(2,'0')}.csv`;
   try{
